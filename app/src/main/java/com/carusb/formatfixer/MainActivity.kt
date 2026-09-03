@@ -572,7 +572,6 @@ fun CarUsbApp(
                             .padding(vertical = 14.dp)
                     )
                 }
-                }
             }
         }
     }
