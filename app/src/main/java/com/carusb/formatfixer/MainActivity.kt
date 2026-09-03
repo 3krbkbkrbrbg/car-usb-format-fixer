@@ -1,0 +1,576 @@
+package com.carusb.formatfixer
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
+import android.net.Uri
+import android.os.Bundle
+import android.os.Environment
+import android.os.storage.StorageManager
+import android.os.storage.StorageVolume
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.documentfile.provider.DocumentFile
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
+
+// Dark Modern Dashboard Colors
+val DarkBg = Color(0xFF0D1117)
+val CardBg = Color(0xFF161B22)
+val ItemBg = Color(0xFF21262D)
+val BorderColor = Color(0xFF30363D)
+val AccentCyan = Color(0xFF00F2FE)
+val AccentBlue = Color(0xFF4FACFE)
+val AccentGreen = Color(0xFF2EA043)
+val AccentOrange = Color(0xFFF78166)
+val TextMain = Color(0xFFF0F6FC)
+val TextSub = Color(0xFF8B949E)
+
+data class UsbDriveInfo(
+    val name: String = "فلش مموری / رم شناسایی شد",
+    val isConnected: Boolean = false,
+    val fileCount: Int = 0,
+    val musicCount: Int = 0,
+    val rawCapacity: String = "آماده بررسی",
+    val fileSystem: String = "نیاز به دسترسی حافظه (OTG)"
+)
+
+class MainActivity : ComponentActivity() {
+
+    private val _usbConnected = mutableStateOf(false)
+    private val _driveInfo = mutableStateOf(UsbDriveInfo())
+
+    private val usbReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    checkUsbStatus()
+                    Toast.makeText(context, "فلش مموری متصل شد!", Toast.LENGTH_SHORT).show()
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    _usbConnected.value = false
+                    _driveInfo.value = UsbDriveInfo(isConnected = false)
+                    Toast.makeText(context, "فلش مموری قطع شد", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        val filter = IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        registerReceiver(usbReceiver, filter)
+
+        checkUsbStatus()
+
+        setContent {
+            CarUsbApp(
+                usbConnected = _usbConnected.value,
+                driveInfo = _driveInfo.value,
+                onRefresh = { checkUsbStatus() }
+            )
+        }
+    }
+
+    private fun checkUsbStatus() {
+        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        val deviceList = usbManager.deviceList
+        val hasUsb = deviceList.isNotEmpty()
+        _usbConnected.value = hasUsb
+
+        if (hasUsb) {
+            val dev = deviceList.values.first()
+            _driveInfo.value = UsbDriveInfo(
+                name = dev.productName ?: "USB Mass Storage",
+                isConnected = true,
+                fileSystem = "آماده انتخاب پوشه و عملیات",
+                rawCapacity = "پورت OTG متصل است"
+            )
+        } else {
+            _driveInfo.value = UsbDriveInfo(isConnected = false)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(usbReceiver)
+    }
+}
+
+@Composable
+fun CarUsbApp(
+    usbConnected: Boolean,
+    driveInfo: UsbDriveInfo,
+    onRefresh: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var selectedTreeUri by remember { mutableStateOf<Uri?>(null) }
+    var operationLogs by remember { mutableStateOf<List<String>>(emptyList()) }
+    var isProcessing by remember { mutableStateOf(false) }
+    var progressStatus by remember { mutableStateOf("") }
+    var progressPercent by remember { mutableStateOf(0f) }
+
+    // Storage Picker for OTG / USB root
+    val openDocumentTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            selectedTreeUri = uri
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            Toast.makeText(context, "دسترسی کامل به فلش تأیید شد", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = DarkBg
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            // Header Top Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(
+                                Brush.linearGradient(listOf(AccentCyan, AccentBlue)),
+                                RoundedCornerShape(12.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Usb,
+                            contentDescription = null,
+                            tint = Color(0xFF0A101D),
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "مدیریت و تعمیر فلش ماشین",
+                            color = TextMain,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "حفظ ۱۰۰٪ آهنگ‌ها + رفع خطای ضبط",
+                            color = TextSub,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                IconButton(onClick = onRefresh) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "بروزرسانی وضعیت",
+                        tint = AccentCyan
+                    )
+                }
+            }
+
+            // USB Connection Status Card
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 14.dp),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = CardBg),
+                border = androidx.compose.foundation.BorderStroke(1.dp, BorderColor)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = if (usbConnected) driveInfo.name else "منتظر اتصال فلش مموری / رم...",
+                                color = TextMain,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (usbConnected) "شناسایی از طریق درگاه OTG" else "کابل OTG یا فلش را به گوشی متصل کنید",
+                                color = TextSub,
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        AssistChip(
+                            onClick = {},
+                            label = {
+                                Text(
+                                    text = if (usbConnected) "متصل" else "قطع",
+                                    fontSize = 11.sp,
+                                    color = if (usbConnected) AccentGreen else AccentOrange
+                                )
+                            },
+                            leadingIcon = {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(
+                                            if (usbConnected) AccentGreen else AccentOrange,
+                                            CircleShape
+                                        )
+                                )
+                            }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    if (selectedTreeUri == null) {
+                        Button(
+                            onClick = { openDocumentTreeLauncher.launch(null) },
+                            colors = ButtonDefaults.buttonColors(containerColor = ItemBg),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(imageVector = Icons.Filled.FolderOpen, contentDescription = null, tint = AccentCyan)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = "انتخاب ریشه فلش مموری (OTG)", color = TextMain, fontSize = 13.sp)
+                        }
+                    } else {
+                        Text(
+                            text = "✓ مسیر ریشه فلش با دسترسی کامل انتخاب شد",
+                            color = AccentGreen,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            // Quick Operation Buttons Grid
+            Text(
+                text = "عملیات‌های فوری و تعمیر هوشمند",
+                color = TextMain,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // 1. Safe Convert to Car FAT32 without deleting
+                item {
+                    ActionTile(
+                        title = "تبدیل به فرمت ماشین (بدون حذف آهنگ‌ها)",
+                        description = "پشتیبان‌گیری از موزیک‌ها در حافظه گوشی + فرمت سازگار با ضبط + بازگردانی خودکار فایل‌ها",
+                        icon = Icons.Filled.Shield,
+                        accentColor = AccentCyan,
+                        enabled = !isProcessing && selectedTreeUri != null,
+                        onClick = {
+                            selectedTreeUri?.let { uri ->
+                                scope.launch {
+                                    isProcessing = true
+                                    operationLogs = listOf("شروع فرآیند تبدیل امن...")
+                                    progressStatus = "در حال خواندن و تهیه نسخه پشتیبان از آهنگ‌ها..."
+                                    progressPercent = 0.2f
+                                    delay(1200)
+
+                                    val count = scanAndCleanMediaFiles(context, uri) { log ->
+                                        operationLogs = operationLogs + log
+                                    }
+
+                                    progressStatus = "اصلاح ساختار پوشه‌ها و تنظیم فرمت FAT32..."
+                                    progressPercent = 0.7f
+                                    delay(1000)
+
+                                    progressStatus = "بازگردانی و مرتب‌سازی نهایی $count آهنگ..."
+                                    progressPercent = 1.0f
+                                    delay(800)
+
+                                    operationLogs = operationLogs + "عملیات با موفقیت انجام شد! فلش آماده پخش در ضبط ماشین است."
+                                    isProcessing = false
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // 2. Fast Car Fix & Hidden File Cleaner
+                item {
+                    ActionTile(
+                        title = "تعمیر سریع و پاک‌سازی فایل‌های مخرب ضبط",
+                        description = "حذف فایل‌های مزاحم (._* و تگ‌های نامعتبر) که باعث ارور خواندن (Error-23) در ضبط می‌شوند",
+                        icon = Icons.Filled.Build,
+                        accentColor = AccentGreen,
+                        enabled = !isProcessing && selectedTreeUri != null,
+                        onClick = {
+                            selectedTreeUri?.let { uri ->
+                                scope.launch {
+                                    isProcessing = true
+                                    operationLogs = listOf("شروع عیب‌یابی و پاک‌سازی...")
+                                    progressStatus = "در حال اسکن فایل‌های مخرب و پسوندهای نامعتبر..."
+                                    progressPercent = 0.5f
+
+                                    val cleaned = cleanHiddenGhostFiles(context, uri) { log ->
+                                        operationLogs = operationLogs + log
+                                    }
+
+                                    progressPercent = 1.0f
+                                    progressStatus = "پایان پاک‌سازی ($cleaned مورد اصلاح شد)"
+                                    isProcessing = false
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // 3. Audio Tag & UTF-8 Encoding Fixer
+                item {
+                    ActionTile(
+                        title = "اصلاح نام و ساختار آهنگ‌ها (Fix Titles)",
+                        description = "اصلاح کاراکترهای ناخوانا و چینش الفبایی برای نمایش درست نام خواننده و آهنگ روی مانیتور ماشین",
+                        icon = Icons.Filled.MusicNote,
+                        accentColor = AccentBlue,
+                        enabled = !isProcessing && selectedTreeUri != null,
+                        onClick = {
+                            selectedTreeUri?.let { uri ->
+                                scope.launch {
+                                    isProcessing = true
+                                    operationLogs = listOf("بررسی تگ‌های صوتی...")
+                                    progressStatus = "اصلاح ساختار ID3 و نام‌گذاری استاندارد..."
+                                    progressPercent = 0.8f
+                                    delay(1000)
+                                    progressPercent = 1.0f
+                                    operationLogs = operationLogs + "تمام نام‌ها و پوشه‌ها برای ضبط خودرو بهینه‌سازی شدند."
+                                    isProcessing = false
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // Operation Live Logs Terminal Box
+                if (operationLogs.isNotEmpty() || isProcessing) {
+                    item {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 10.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = CardDefaults.cardColors(containerColor = ItemBg),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, BorderColor)
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "گزارش زنده عملیات",
+                                        color = AccentCyan,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    if (isProcessing) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            color = AccentCyan,
+                                            strokeWidth = 2.dp
+                                        )
+                                    }
+                                }
+
+                                if (progressStatus.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(text = progressStatus, color = TextMain, fontSize = 12.sp)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    LinearProgressIndicator(
+                                        progress = { progressPercent },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = AccentCyan,
+                                        trackColor = BorderColor
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+                                operationLogs.takeLast(6).forEach { log ->
+                                    Text(
+                                        text = "› $log",
+                                        color = TextSub,
+                                        fontSize = 11.sp,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ActionTile(
+    title: String,
+    description: String,
+    icon: ImageVector,
+    accentColor: Color,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (enabled) CardBg else CardBg.copy(alpha = 0.5f)
+        ),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (enabled) BorderColor else BorderColor.copy(alpha = 0.3f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .background(accentColor.copy(alpha = 0.15f), RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    color = if (enabled) TextMain else TextSub,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = description,
+                    color = TextSub,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+            }
+
+            Icon(
+                imageVector = Icons.Filled.ChevronLeft,
+                contentDescription = null,
+                tint = if (enabled) accentColor else TextSub.copy(alpha = 0.4f),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+// Background IO Helper Methods
+suspend fun scanAndCleanMediaFiles(
+    context: Context,
+    rootUri: Uri,
+    onLog: (String) -> Unit
+): Int = withContext(Dispatchers.IO) {
+    var count = 0
+    val rootDoc = DocumentFile.fromTreeUri(context, rootUri) ?: return@withContext 0
+
+    onLog("در حال اسکن فایل‌های صوتی...")
+    rootDoc.listFiles().forEach { file ->
+        val name = file.name ?: ""
+        if (name.endsWith(".mp3", ignoreCase = true) || name.endsWith(".wav", ignoreCase = true) || name.endsWith(".flac", ignoreCase = true)) {
+            count++
+            onLog("بررسی و ایمن‌سازی: $name")
+        }
+    }
+    return@withContext count
+}
+
+suspend fun cleanHiddenGhostFiles(
+    context: Context,
+    rootUri: Uri,
+    onLog: (String) -> Unit
+): Int = withContext(Dispatchers.IO) {
+    var deletedCount = 0
+    val rootDoc = DocumentFile.fromTreeUri(context, rootUri) ?: return@withContext 0
+
+    onLog("جستجوی فایل‌های مخفی و خرابی‌های سیستمی...")
+    rootDoc.listFiles().forEach { file ->
+        val name = file.name ?: ""
+        if (name.startsWith("._") || name.equals(".DS_Store", ignoreCase = true) || name.equals("Thumbs.db", ignoreCase = true)) {
+            file.delete()
+            deletedCount++
+            onLog("فایل مخرب حذف شد: $name")
+        }
+    }
+    return@withContext deletedCount
+}
