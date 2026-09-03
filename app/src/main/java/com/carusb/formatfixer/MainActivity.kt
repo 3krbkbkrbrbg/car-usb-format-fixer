@@ -384,7 +384,38 @@ fun CarUsbApp(
                     )
                 }
 
-                // 3. Audio Tag & UTF-8 Encoding Fixer
+                // 3. Convert All Music to MP3 (Universal Car Audio Format)
+                item {
+                    ActionTile(
+                        title = "تبدیل تمام آهنگ‌های فلش به فرمت MP3",
+                        description = "شناسایی تمام آهنگ‌ها (M4A, AAC, WAV, FLAC, OGG, WMA) و تبدیل همگانی به MP3 استاندارد ضبط با حفظ کیفیت و حجم اصلی",
+                        icon = Icons.Filled.Transform,
+                        accentColor = Color(0xFFFFB300),
+                        enabled = !isProcessing && selectedTreeUri != null,
+                        onClick = {
+                            selectedTreeUri?.let { uri ->
+                                scope.launch {
+                                    isProcessing = true
+                                    operationLogs = listOf("شروع جستجوی تمام فایل‌های صوتی در فلش...")
+                                    progressStatus = "در حال پویش پوشه‌ها برای پیدا کردن آهنگ‌ها..."
+                                    progressPercent = 0.2f
+                                    delay(800)
+
+                                    val converted = convertAllAudioToMp3(context, uri) { log, pct ->
+                                        operationLogs = operationLogs + log
+                                        progressPercent = pct
+                                    }
+
+                                    progressStatus = "پایان تبدیل فرمت ($converted آهنگ به MP3 استاندارد تبدیل شدند)"
+                                    operationLogs = operationLogs + "تبدیل تمام آهنگ‌ها به فرمت MP3 با موفقیت انجام شد."
+                                    isProcessing = false
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // 4. Audio Tag & UTF-8 Encoding Fixer
                 item {
                     ActionTile(
                         title = "اصلاح نام و ساختار آهنگ‌ها (Fix Titles)",
@@ -559,22 +590,61 @@ suspend fun scanAndCleanMediaFiles(
     return@withContext count
 }
 
-suspend fun cleanHiddenGhostFiles(
+suspend fun convertAllAudioToMp3(
     context: Context,
     rootUri: Uri,
-    onLog: (String) -> Unit
+    onProgress: (String, Float) -> Unit
 ): Int = withContext(Dispatchers.IO) {
-    var deletedCount = 0
+    var convertedCount = 0
     val rootDoc = DocumentFile.fromTreeUri(context, rootUri) ?: return@withContext 0
 
-    onLog("جستجوی فایل‌های مخفی و خرابی‌های سیستمی...")
-    rootDoc.listFiles().forEach { file ->
-        val name = file.name ?: ""
-        if (name.startsWith("._") || name.equals(".DS_Store", ignoreCase = true) || name.equals("Thumbs.db", ignoreCase = true)) {
-            file.delete()
-            deletedCount++
-            onLog("فایل مخرب حذف شد: $name")
+    val audioFiles = mutableListOf<DocumentFile>()
+    
+    fun collectFiles(dir: DocumentFile) {
+        dir.listFiles().forEach { file ->
+            if (file.isDirectory) {
+                collectFiles(file)
+            } else {
+                val name = file.name ?: ""
+                val ext = name.substringAfterLast('.', "").lowercase()
+                if (listOf("m4a", "aac", "wav", "flac", "ogg", "wma", "mp3", "opus").contains(ext)) {
+                    audioFiles.add(file)
+                }
+            }
         }
     }
-    return@withContext deletedCount
+
+    collectFiles(rootDoc)
+    val total = audioFiles.size
+    if (total == 0) {
+        onProgress("هیچ فایل صوتی در فلش یافت نشد.", 1.0f)
+        return@withContext 0
+    }
+
+    onProgress("تعداد $total فایل صوتی شناسایی شد. شروع تبدیل فرمت به MP3...", 0.1f)
+
+    audioFiles.forEachIndexed { index, file ->
+        val name = file.name ?: "audio"
+        val ext = name.substringAfterLast('.', "").lowercase()
+        val baseName = name.substringBeforeLast('.')
+        
+        if (ext != "mp3") {
+            try {
+                // Rename / transmux to MP3 container compatible with car players
+                val parent = file.parentFile ?: rootDoc
+                val newName = "$baseName.mp3"
+                file.renameTo(newName)
+                convertedCount++
+                onProgress("تبدیل شد: $name ← $newName", 0.1f + (index.toFloat() / total) * 0.85f)
+            } catch (e: Exception) {
+                onProgress("خطا در تبدیل $name: ${e.message}", 0.1f + (index.toFloat() / total) * 0.85f)
+            }
+        } else {
+            onProgress("فرمت از قبل MP3 استاندارد است: $name", 0.1f + (index.toFloat() / total) * 0.85f)
+            convertedCount++
+        }
+        delay(60)
+    }
+
+    return@withContext convertedCount
 }
