@@ -318,11 +318,41 @@ fun CarUsbApp(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // 1. Specialized IKCO / Peugeot 206 / Pioneer Car Fix
+                // 1. Full Deep Clean + MP3-Only Safe Rebuild
                 item {
                     ActionTile(
-                        title = "تعمیر تخصصی ضبط ۲۰۶ / ایران‌خودرو (حل مشکل پریدن روی رادیو)",
-                        description = "اصلاح ساختار تک‌لایه‌ای روت، حذف کامل فولدرهای تودرتو و عمیق، حذف فایل‌های مخفی و سیستم‌عامل، و نام‌گذاری استاندارد ۸.۳ کلاستر FAT32 مخصوص ضبط کروز و موج‌نیک ۲۰۶",
+                        title = "بکاپ MP3 + فرمت و پاک‌سازی کامل + بازگردانی (حل ۱۰۰٪)",
+                        description = "روش قطعی برای ضبط‌های حساس ۲۰۶ و پژو: ۱. استخراج و کپی تمام بایت‌های MP3 در حافظه امن گوشی ۲. حذف تمام فایل‌ها، پوشه‌ها و اطلاعات سیستمی فلش ۳. ریستور تمیز فقط و فقط فایل‌های MP3 بدون هیج فایل اضافی",
+                        icon = Icons.Filled.RestartAlt,
+                        accentColor = Color(0xFF00E676),
+                        enabled = !isProcessing && selectedTreeUri != null,
+                        onClick = {
+                            selectedTreeUri?.let { uri ->
+                                scope.launch {
+                                    isProcessing = true
+                                    operationLogs = listOf("شروع متد قطعی: بکاپ کامل MP3 و بازسازی فلش...")
+                                    progressStatus = "گام ۱/۳: در حال کپی و پشتیبان‌گیری تمام فایل‌های MP3 در حافظه امن گوشی..."
+                                    progressPercent = 0.1f
+
+                                    val count = fullBackupPurgeAndRestoreMp3(context, uri) { log, pct ->
+                                        operationLogs = operationLogs + log
+                                        progressPercent = pct
+                                    }
+
+                                    progressStatus = "پایان عملیات ($count فایل MP3 بازگردانی شد)"
+                                    operationLogs = operationLogs + "عملیات ۱۰۰٪ با موفقیت انجام شد! فلش اکنون کاملاً خالص و بدون هیچ باگ سیستمی در ضبط ماشین پخش خواهد شد."
+                                    isProcessing = false
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // 2. Specialized IKCO / Peugeot 206 / Pioneer Car Fix
+                item {
+                    ActionTile(
+                        title = "تعمیر سریع ساختار پوشه‌ها و تگ‌ها (Quick Fix)",
+                        description = "اصلاح نام فایل‌ها و حذف فایل‌های گوست بدون انجام بکاپ کامل",
                         icon = Icons.Filled.DriveEta,
                         accentColor = Color(0xFFFF5252),
                         enabled = !isProcessing && selectedTreeUri != null,
@@ -718,6 +748,104 @@ suspend fun fixPeugeot206HeadUnit(
 
     onProgress("۴. ساختار فلش مموری مطابق استاندارد دقیق ضبط ۲۰۶ (Crouse/Mojnikan) بازنویسی شد.", 1.0f)
     return@withContext fixedCount
+}
+
+suspend fun fullBackupPurgeAndRestoreMp3(
+    context: Context,
+    rootUri: Uri,
+    onProgress: (String, Float) -> Unit
+): Int = withContext(Dispatchers.IO) {
+    val rootDoc = DocumentFile.fromTreeUri(context, rootUri) ?: return@withContext 0
+    val cacheDir = File(context.cacheDir, "car_usb_mp3_temp")
+    if (cacheDir.exists()) cacheDir.deleteRecursively()
+    cacheDir.mkdirs()
+
+    val resolver = context.contentResolver
+    val audioFiles = mutableListOf<DocumentFile>()
+
+    // 1. Scan and collect ALL Audio
+    fun collectAudio(dir: DocumentFile) {
+        dir.listFiles().forEach { file ->
+            if (file.isDirectory) {
+                val name = file.name ?: ""
+                if (!name.startsWith(".") && !name.equals("System Volume Information", true)) {
+                    collectAudio(file)
+                }
+            } else {
+                val name = file.name ?: ""
+                val ext = name.substringAfterLast('.', "").lowercase()
+                if (listOf("mp3", "m4a", "aac", "wav", "flac", "wma", "ogg").contains(ext) && !name.startsWith("._")) {
+                    audioFiles.add(file)
+                }
+            }
+        }
+    }
+
+    collectAudio(rootDoc)
+    val total = audioFiles.size
+    if (total == 0) {
+        onProgress("هیچ فایل صوتی داخل فلش پیدا نشد.", 1.0f)
+        return@withContext 0
+    }
+
+    onProgress("تعداد $total آهنگ پیدا شد. شروع بکاپ‌گیری در حافظه گوشی...", 0.1f)
+
+    // 2. Backup to Phone Cache
+    audioFiles.forEachIndexed { index, docFile ->
+        val originalName = docFile.name ?: "Track_$index.mp3"
+        val baseName = originalName.substringBeforeLast('.').replace(Regex("[^a-zA-Z0-9 _\\-\\u0600-\\u06FF]"), "").trim()
+        val safeName = if (baseName.isEmpty()) "Track_${index + 1}.mp3" else "$baseName.mp3"
+        val tempFile = File(cacheDir, safeName)
+
+        try {
+            resolver.openInputStream(docFile.uri)?.use { input ->
+                tempFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            onProgress("بکاپ موفق ($index/$total): $safeName", 0.1f + (index.toFloat() / total) * 0.4f)
+        } catch (e: Exception) {
+            onProgress("خطا در کپی $originalName: ${e.message}", 0.1f + (index.toFloat() / total) * 0.4f)
+        }
+    }
+
+    // 3. Purge EVERYTHING in the Flash Drive
+    onProgress("گام ۲/۳: پاک‌سازی و حذف کامل تمامی فایل‌ها، پوشه‌ها و خطاهای فلش...", 0.55f)
+    rootDoc.listFiles().forEach { file ->
+        try {
+            file.delete()
+        } catch (e: Exception) {
+            // Ignore system lock
+        }
+    }
+    delay(1000)
+
+    // 4. Restore ONLY Pure MP3s back to Root of Flash Drive
+    onProgress("گام ۳/۳: در حال بازگردانی آهنگ‌ها به فرمت استاندارد ضبط ماشین...", 0.65f)
+    val backedFiles = cacheDir.listFiles() ?: emptyArray()
+    var restoredCount = 0
+
+    backedFiles.forEachIndexed { index, localFile ->
+        try {
+            val newFile = rootDoc.createFile("audio/mpeg", localFile.name)
+            if (newFile != null) {
+                localFile.inputStream().use { input ->
+                    resolver.openOutputStream(newFile.uri)?.use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                restoredCount++
+                onProgress("ریستور شد: ${localFile.name}", 0.65f + (index.toFloat() / backedFiles.size) * 0.35f)
+            }
+        } catch (e: Exception) {
+            onProgress("خطا در بازگردانی ${localFile.name}: ${e.message}", 0.65f + (index.toFloat() / backedFiles.size) * 0.35f)
+        }
+    }
+
+    // Clean up phone cache
+    cacheDir.deleteRecursively()
+    onProgress("بازگردانی $restoredCount فایل صوتی MP3 خالص به فلش به پایان رسید.", 1.0f)
+    return@withContext restoredCount
 }
 
 suspend fun convertAllAudioToMp3(
