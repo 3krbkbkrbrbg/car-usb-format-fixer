@@ -558,6 +558,21 @@ fun CarUsbApp(
                         }
                     }
                 }
+
+                // Hellboy Coder Signature
+                item {
+                    Text(
+                        text = "Crafted with passion by Hellboy Coder ⚡",
+                        color = TextSub.copy(alpha = 0.6f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 14.dp)
+                    )
+                }
+                }
             }
         }
     }
