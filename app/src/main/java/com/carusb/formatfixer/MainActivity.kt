@@ -389,7 +389,7 @@ fun CarUsbApp(
                     ActionTile(
                         title = "تبدیل تمام آهنگ‌های فلش به فرمت MP3",
                         description = "شناسایی تمام آهنگ‌ها (M4A, AAC, WAV, FLAC, OGG, WMA) و تبدیل همگانی به MP3 استاندارد ضبط با حفظ کیفیت و حجم اصلی",
-                        icon = Icons.Filled.Transform,
+                        icon = Icons.Filled.Audiotrack,
                         accentColor = Color(0xFFFFB300),
                         enabled = !isProcessing && selectedTreeUri != null,
                         onClick = {
@@ -588,6 +588,26 @@ suspend fun scanAndCleanMediaFiles(
         }
     }
     return@withContext count
+}
+
+suspend fun cleanHiddenGhostFiles(
+    context: Context,
+    rootUri: Uri,
+    onLog: (String) -> Unit
+): Int = withContext(Dispatchers.IO) {
+    var deletedCount = 0
+    val rootDoc = DocumentFile.fromTreeUri(context, rootUri) ?: return@withContext 0
+
+    onLog("جستجوی فایل‌های مخفی و خرابی‌های سیستمی...")
+    rootDoc.listFiles().forEach { file ->
+        val name = file.name ?: ""
+        if (name.startsWith("._") || name.equals(".DS_Store", ignoreCase = true) || name.equals("Thumbs.db", ignoreCase = true)) {
+            file.delete()
+            deletedCount++
+            onLog("فایل مخرب حذف شد: $name")
+        }
+    }
+    return@withContext deletedCount
 }
 
 suspend fun convertAllAudioToMp3(
